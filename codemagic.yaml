@@ -10,7 +10,8 @@ workflows:
           echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/HybridFLApp/local.properties"
       - name: Build Debug APK
         script: |
-          cd HybridFLApp
+          cd $CM_BUILD_DIR/HybridFLApp
+          chmod +x gradlew
           ./gradlew assembleDebug
     artifacts:
       - HybridFLApp/app/build/outputs/apk/debug/*.apk
