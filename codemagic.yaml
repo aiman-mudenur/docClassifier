@@ -8,14 +8,11 @@ workflows:
       - name: Set Android SDK location
         script: |
           echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/HybridFLApp/local.properties"
-      - name: Find gradlew
-        script: |
-          find $CM_BUILD_DIR -name "gradlew" -type f
       - name: Build Debug APK
         script: |
-          GRADLEW=$(find $CM_BUILD_DIR -name "gradlew" -type f | head -1)
-          chmod +x "$GRADLEW"
-          cd $(dirname "$GRADLEW")
+          cd $CM_BUILD_DIR/HybridFLApp
+          sed -i 's/\r//' gradlew
+          chmod +x gradlew
           ./gradlew assembleDebug
     artifacts:
       - "**/build/outputs/apk/debug/*.apk"
