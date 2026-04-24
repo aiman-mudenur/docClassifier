@@ -1,0 +1,23 @@
+# Gradle files
+.gradle/
+build/
+**/build/
+
+# Android Studio
+.idea/
+*.iws
+*.iml
+*.ipr
+local.properties
+
+# Generated APKs and AABs
+*.apk
+*.aab
+*.ap_
+
+# Keystore (keep this secret!)
+*.jks
+*.keystore
+
+# Node modules (if React Native)
+node_modules/
