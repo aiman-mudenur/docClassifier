@@ -1,0 +1,22 @@
+workflows:
+  android-debug:
+    name: HybridFL Android APK
+    max_build_duration: 60
+    environment:
+      android_signing:
+        - android_keystore
+      java: 17
+    scripts:
+      - name: Set Android SDK location
+        script: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/HybridFLApp/local.properties"
+      - name: Build Debug APK
+        script: |
+          cd HybridFLApp
+          ./gradlew assembleDebug
+    artifacts:
+      - HybridFLApp/app/build/outputs/apk/debug/*.apk
+    publishing:
+      email:
+        recipients:
+          - aimanmudenur2@gmail.com
