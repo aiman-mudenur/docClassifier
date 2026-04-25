@@ -65,25 +65,44 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch {
-            _flStatus.value = "Sending Weights to Server..."
+            _flStatus.value = "Sending weights to server..."
             try {
-                val response = RetrofitClient.apiService.sendWeights(
-                    FLUpdateRequest(deviceId = deviceId, weightDeltas = deltas.toList())
+                // Convert flat delta array into 6 layers matching model architecture:
+                // W1(128×64), b1(64), W2(64×32), b2(32), W3(32×5), b3(5)
+                val layerSizes = listOf(128*64, 64, 64*32, 32, 32*5, 5)
+                val layerShapes = listOf(
+                    Pair(128, 64), null, Pair(64, 32), null, Pair(32, 5), null
                 )
+                val layers = mutableListOf<List<Float>>()
+                var offset = 0
+                for (size in layerSizes) {
+                    val slice = deltas.slice(offset until (offset + size).coerceAtMost(deltas.size))
+                    layers.add(slice)
+                    offset += size
+                }
+
+                val request = FLUpdateRequest(
+                    device_id = deviceId,
+                    weights = layers,
+                    num_samples = 100,
+                    battery_level = _batteryLevel.value,
+                    is_charging = false,
+                    local_loss = 0.31f,
+                    round = 0,
+                    topic_counts = mapOf("0" to 50, "1" to 30, "2" to 20),
+                    doc_types = listOf("pdf", "docx")
+                )
+
+                val response = RetrofitClient.apiService.sendWeights(request)
                 if (response.isSuccessful) {
-                    _flStatus.value = "FL Updated Successfully"
+                    val body = response.body()
+                    _flStatus.value = "FL ${body?.status ?: "done"} — round ${body?.round ?: 0}"
                 } else {
-                    _flStatus.value = "FL Update Failed"
+                    _flStatus.value = "FL failed: ${response.code()}"
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                _flStatus.value = "FL Network Error"
+                _flStatus.value = "FL error: ${e.message}"
             }
         }
     }
-
-    override fun onCleared() {
-        super.onCleared()
-        tfliteHelper.close()
-    }
-}
