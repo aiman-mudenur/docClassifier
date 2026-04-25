@@ -57,7 +57,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             sendFederatedUpdate(result.second)
         }
     }
-
     private fun sendFederatedUpdate(deltas: FloatArray) {
         if (_batteryLevel.value < 20) {
             _flStatus.value = "FL Skipped (Low Battery)"
@@ -67,12 +66,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _flStatus.value = "Sending weights to server..."
             try {
-                // Convert flat delta array into 6 layers matching model architecture:
-                // W1(128×64), b1(64), W2(64×32), b2(32), W3(32×5), b3(5)
                 val layerSizes = listOf(128*64, 64, 64*32, 32, 32*5, 5)
-                val layerShapes = listOf(
-                    Pair(128, 64), null, Pair(64, 32), null, Pair(32, 5), null
-                )
                 val layers = mutableListOf<List<Float>>()
                 var offset = 0
                 for (size in layerSizes) {
@@ -104,5 +98,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 e.printStackTrace()
                 _flStatus.value = "FL error: ${e.message}"
             }
-        }
+        }  // ← closes viewModelScope.launch
+    }  // ← closes sendFederatedUpdate
+
+    override fun onCleared() {
+        super.onCleared()
+        tfliteHelper.close()
     }
+}  // ← closes class AppViewModel
