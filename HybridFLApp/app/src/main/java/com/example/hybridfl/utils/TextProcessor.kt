@@ -7,7 +7,7 @@ import java.io.InputStreamReader
 
 class TextProcessor(private val context: Context) {
     private val vocab = mutableMapOf<String, Int>()
-    private val maxLen = 200
+    private val maxLen = 100
 
     init {
         loadVocab()
