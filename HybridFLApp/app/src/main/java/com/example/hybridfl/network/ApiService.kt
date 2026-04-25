@@ -1,13 +1,29 @@
 package com.example.hybridfl.network
 
+import com.google.gson.JsonArray
 import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.POST
 
+// ── Register ──────────────────────────────────────────────────────────────
+data class RegisterRequest(
+    val device_id: String,
+    val battery_level: Int,
+    val is_charging: Boolean,
+    val model_version: String = "1.0"
+)
+
+data class RegisterResponse(
+    val status: String,
+    val device_id: String
+)
+
+// ── Upload weights ─────────────────────────────────────────────────────────
+// weights is JsonArray so it handles both flat (bias) and nested (matrix) layers
 data class FLUpdateRequest(
     val device_id: String,
-    val weights: List<List<Float>>,   // matches app.py: list of layers
+    val weights: JsonArray,
     val num_samples: Int,
     val battery_level: Int,
     val is_charging: Boolean,
@@ -20,24 +36,27 @@ data class FLUpdateRequest(
 data class FLUpdateResponse(
     val status: String,
     val message: String?,
-    val round: Int?,
-    val avg_loss: Float?,
-    val topic_pct: Map<String, Float>?
+    val round: Int?
 )
 
+// ── Global model ───────────────────────────────────────────────────────────
 data class GlobalModelResponse(
-    val weights: List<List<Float>>,
+    val weights: JsonArray,
     val round: Int,
-    val layers: Int
+    val layers: Int,
+    val num_classes: Int
 )
 
 interface ApiService {
 
-    @POST("/upload_weights")
-    suspend fun sendWeights(@Body request: FLUpdateRequest): Response<FLUpdateResponse>
+    @POST("/register")
+    suspend fun register(@Body request: RegisterRequest): Response<RegisterResponse>
 
     @GET("/get_global_model")
     suspend fun getGlobalModel(): Response<GlobalModelResponse>
+
+    @POST("/upload_weights")
+    suspend fun sendWeights(@Body request: FLUpdateRequest): Response<FLUpdateResponse>
 
     @GET("/health")
     suspend fun health(): Response<Map<String, Any>>
