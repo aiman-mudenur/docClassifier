@@ -14,12 +14,28 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.hybridfl.viewmodel.AppViewModel
 
+// ✅ DBpedia-14 class names
+val CLASS_NAMES = listOf(
+    "Company",
+    "EducationalInstitution",
+    "Artist",
+    "Athlete",
+    "OfficeHolder",
+    "MeanOfTransportation",
+    "Building",
+    "NaturalPlace",
+    "Village",
+    "Animal",
+    "Plant",
+    "Album",
+    "Film",
+    "WrittenWork"
+)
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
         com.example.hybridfl.utils.FileUtil.initPdfBox(this)
-        
         setContent {
             MaterialTheme {
                 Surface(
@@ -39,7 +55,9 @@ fun HybridFLScreen(viewModel: AppViewModel = viewModel()) {
     val flStatus by viewModel.flStatus.collectAsState()
     val battery by viewModel.batteryLevel.collectAsState()
 
-    val filePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
         uri?.let { viewModel.processDocument(it) }
     }
 
@@ -49,8 +67,11 @@ fun HybridFLScreen(viewModel: AppViewModel = viewModel()) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Text(text = "Privacy-Preserving Document Classification", style = MaterialTheme.typography.titleLarge)
-        
+        Text(
+            text = "Privacy-Preserving Document Classification",
+            style = MaterialTheme.typography.titleLarge
+        )
+
         Card(
             modifier = Modifier.fillMaxWidth(),
             elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
@@ -69,19 +90,27 @@ fun HybridFLScreen(viewModel: AppViewModel = viewModel()) {
             Text("Upload Document")
         }
 
-        Text(text = "FL Status: $flStatus", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary)
+        Text(
+            text = "FL Status: $flStatus",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.primary
+        )
 
         predictions?.let { probs ->
-            Text(text = "Classification Results:", style = MaterialTheme.typography.titleMedium)
-            
-            // Show Top 5 Predictions
-            val top5 = probs.mapIndexed { index, fl -> Pair(index, fl) }
+            Text(
+                text = "Classification Results:",
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            // ✅ Show Top 5 with real DBpedia class names
+            val top5 = probs.mapIndexed { index, prob -> Pair(index, prob) }
                 .sortedByDescending { it.second }
                 .take(5)
-                
+
             top5.forEach { (index, prob) ->
                 val percentage = (prob * 100).toInt()
-                Text("Class ${index + 1}: $percentage%")
+                val className = CLASS_NAMES.getOrElse(index) { "Class $index" }
+                Text("$className: $percentage%")
             }
         }
     }

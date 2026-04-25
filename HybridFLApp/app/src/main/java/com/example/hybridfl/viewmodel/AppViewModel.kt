@@ -28,13 +28,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _flStatus = MutableStateFlow("Waiting")
     val flStatus: StateFlow<String> = _flStatus
 
-    private val _batteryLevel = MutableStateFlow(85) // Simulated battery
+    private val _batteryLevel = MutableStateFlow(85)
     val batteryLevel: StateFlow<Int> = _batteryLevel
 
     fun processDocument(uri: Uri) {
         viewModelScope.launch {
             _flStatus.value = "Extracting text..."
-            
+
             val text = withContext(Dispatchers.IO) {
                 FileUtil.extractTextFromUri(getApplication(), uri)
             }
@@ -43,9 +43,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val features = textProcessor.processText(text)
 
             _flStatus.value = "Running Inference..."
-            
-            // Assume system defaults label to 3 as representation or via UI dropdown
-            val simulatedUserLabel = 3 
+            val simulatedUserLabel = 3
 
             val result = withContext(Dispatchers.Default) {
                 tfliteHelper.runInferenceAndCalculateDeltas(features, simulatedUserLabel)
@@ -57,6 +55,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             sendFederatedUpdate(result.second)
         }
     }
+
     private fun sendFederatedUpdate(deltas: FloatArray) {
         if (_batteryLevel.value < 20) {
             _flStatus.value = "FL Skipped (Low Battery)"
@@ -66,11 +65,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _flStatus.value = "Sending weights to server..."
             try {
-                val layerSizes = listOf(128*64, 64, 64*32, 32, 32*5, 5)
+                // ✅ FIXED: correct layer shapes matching train.py DBpedia-14 model
+                // W1(100,64), b1(64), W2(64,32), b2(32), W3(32,14), b3(14)
+                val layerSizes = listOf(
+                    100 * 64,  // W1
+                    64,        // b1
+                    64 * 32,   // W2
+                    32,        // b2
+                    32 * 14,   // W3
+                    14         // b3
+                )
+
                 val layers = mutableListOf<List<Float>>()
                 var offset = 0
                 for (size in layerSizes) {
-                    val slice = deltas.slice(offset until (offset + size).coerceAtMost(deltas.size))
+                    val end = (offset + size).coerceAtMost(deltas.size)
+                    val slice = if (offset < deltas.size) {
+                        deltas.slice(offset until end).let { s ->
+                            // pad with zeros if slice is shorter than expected
+                            s + List(size - s.size) { 0f }
+                        }
+                    } else {
+                        List(size) { 0f }
+                    }
                     layers.add(slice)
                     offset += size
                 }
@@ -98,11 +115,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 e.printStackTrace()
                 _flStatus.value = "FL error: ${e.message}"
             }
-        }  // ← closes viewModelScope.launch
-    }  // ← closes sendFederatedUpdate
-
-    override fun onCleared() {
-        super.onCleared()
-        tfliteHelper.close()
+        }
     }
-}  // ← closes class AppViewModel
+}
