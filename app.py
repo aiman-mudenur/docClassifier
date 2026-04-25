@@ -36,12 +36,12 @@ def load_initial_weights():
     # Input: 128-d TF-IDF-style embedding  →  64  →  32  →  5 classes
     log.warning("initial_weights.json not found — generating default weights.")
     layers = [
-        np.zeros((128, 64)).tolist(),   # W1
+        np.zeros((100, 64)).tolist(),   # W1  ← 100 not 128
         np.zeros(64).tolist(),          # b1
         np.zeros((64, 32)).tolist(),    # W2
         np.zeros(32).tolist(),          # b2
-        np.zeros((32, 5)).tolist(),     # W3  (5 topic/class outputs)
-        np.zeros(5).tolist(),           # b3
+        np.zeros((32, 14)).tolist(),    # W3  ← 14 classes
+        np.zeros(14).tolist(),          # b3
     ]
     with open(WEIGHTS_FILE, "w") as f:
         json.dump(layers, f)
