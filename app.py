@@ -33,15 +33,16 @@ CLASS_NAMES = {
     "10": "Plant",
     "11": "Album",
     "12": "Film",
-    "13": "WrittenWork"
+    "13": "WrittenWork",
 }
 
-INPUT_DIM   = 100
-HIDDEN1     = 64
-HIDDEN2     = 32
-NUM_CLASSES = 14
-
+INPUT_DIM    = 100
+HIDDEN1      = 64
+HIDDEN2      = 32
+NUM_CLASSES  = 14
 WEIGHTS_FILE = "initial_weights.json"
+MIN_CLIENTS  = 3
+
 
 def load_initial_weights():
     if os.path.exists(WEIGHTS_FILE):
@@ -49,10 +50,10 @@ def load_initial_weights():
             weights = json.load(f)
         log.info(f"Loaded initial_weights.json — {len(weights)} layers")
         for i, w in enumerate(weights):
-            shape = np.array(w).shape
-            log.info(f"  Layer {i}: shape={shape}")
+            log.info(f"  Layer {i}: shape={np.array(w).shape}")
         return weights
-    log.warning("initial_weights.json not found — generating zero weights for DBpedia-14.")
+
+    log.warning("initial_weights.json not found — generating zero weights.")
     layers = [
         np.zeros((INPUT_DIM, HIDDEN1)).tolist(),
         np.zeros(HIDDEN1).tolist(),
@@ -65,14 +66,14 @@ def load_initial_weights():
         json.dump(layers, f)
     return layers
 
-global_weights = load_initial_weights()
 
+global_weights  = load_initial_weights()
 client_updates  = []
-MIN_CLIENTS     = 3
 lock            = threading.Lock()
 round_number    = 0
 round_history   = []
 client_registry = {}
+
 
 def fedavg(updates):
     total_samples = sum(u.get("num_samples", 1) for u in updates)
@@ -87,6 +88,7 @@ def fedavg(updates):
         averaged.append(np.sum(layer_stack, axis=0).tolist())
     return averaged
 
+
 def resource_score(meta: dict) -> float:
     battery  = meta.get("battery_level", 100)
     charging = meta.get("is_charging", True)
@@ -94,6 +96,7 @@ def resource_score(meta: dict) -> float:
     if charging:
         score = min(1.0, score + 0.15)
     return round(score, 3)
+
 
 def topic_distribution(updates):
     merged = defaultdict(int)
@@ -103,14 +106,35 @@ def topic_distribution(updates):
     total = sum(merged.values()) or 1
     return {CLASS_NAMES.get(k, k): round(v / total * 100, 2) for k, v in merged.items()}
 
+
+def _try_aggregate():
+    global global_weights, client_updates, round_number
+    if len(client_updates) < MIN_CLIENTS:
+        return False
+    log.info(f"Aggregating round {round_number} with {len(client_updates)} clients...")
+    global_weights = fedavg(client_updates)
+    dist = topic_distribution(client_updates)
+    round_history.append({
+        "round":       round_number,
+        "num_clients": len(client_updates),
+        "topic_dist":  dist,
+        "timestamp":   time.time(),
+    })
+    round_number  += 1
+    client_updates = []
+    log.info(f"Aggregation complete. Now on round {round_number}.")
+    return True
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
         "status":      "ok",
         "round":       round_number,
         "num_classes": NUM_CLASSES,
-        "dataset":     "DBpedia-14"
+        "dataset":     "DBpedia-14",
     })
+
 
 @app.route("/status", methods=["GET"])
 def status():
@@ -124,6 +148,7 @@ def status():
         "history":         round_history[-5:],
     })
 
+
 @app.route("/get_global_model", methods=["GET"])
 def get_global_model():
     return jsonify({
@@ -134,14 +159,16 @@ def get_global_model():
         "class_names": CLASS_NAMES,
     })
 
+
 @app.route("/register", methods=["POST"])
 def register():
     data      = request.get_json(force=True)
     device_id = data.get("device_id", "unknown")
     with lock:
         client_registry[device_id] = {**data, "registered_at": time.time()}
-    log.info(f"Registered device: {device_id}")
+    log.info(f"Registered device: {device_id}  total={len(client_registry)}")
     return jsonify({"status": "registered", "device_id": device_id})
+
 
 @app.route("/upload_weights", methods=["POST"])
 def upload_weights():
@@ -158,7 +185,7 @@ def upload_weights():
     if len(weights) != len(global_weights):
         return jsonify({
             "status":  "error",
-            "message": f"Layer count mismatch: got {len(weights)}, expected {len(global_weights)}"
+            "message": f"Layer count mismatch: got {len(weights)}, expected {len(global_weights)}",
         }), 400
 
     for i, (client_layer, global_layer) in enumerate(zip(weights, global_weights)):
@@ -167,23 +194,28 @@ def upload_weights():
         if cs != gs:
             return jsonify({
                 "status":  "error",
-                "message": f"Shape mismatch at layer {i}: client={cs} vs server={gs}"
+                "message": f"Shape mismatch at layer {i}: client={cs} vs server={gs}",
             }), 400
 
     if client_round >= 0 and round_number - client_round > 2:
         return jsonify({
             "status":  "stale",
             "message": f"Update from round {client_round}; server is on {round_number}.",
-            "round":   round_number
+            "round":   round_number,
         }), 409
 
     resource = resource_score(data)
-    log.info(f"[{device_id}] weights received | samples={data.get('num_samples',1)} "
-             f"battery={data.get('battery_level','?')}% resource_score={resource}")
+    log.info(
+        f"[{device_id}] weights received | "
+        f"samples={data.get('num_samples', 1)} "
+        f"battery={data.get('battery_level', '?')}% "
+        f"resource_score={resource}"
+    )
 
+    aggregated = False
     with lock:
         existing_ids = {u["device_id"] for u in client_updates}
         if device_id in existing_ids:
-            return jsonify({"status": "duplicate", "message": "Already received update from this device this round"}), 200
-
-        client_updates.append
+            return jsonify({
+                "status":  "duplicate",
+                "message": "

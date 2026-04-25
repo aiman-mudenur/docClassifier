@@ -1,22 +1,44 @@
 workflows:
   android-debug:
-    name: HybridFL Android APK
+    name: HybridFL Android Debug APK
     max_build_duration: 60
+
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+
     environment:
       java: 17
+
     scripts:
       - name: Set Android SDK location
         script: |
           echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/HybridFLApp/local.properties"
+
+      - name: Configure Gradle memory
+        script: |
+          GRADLE_PROPS="$CM_BUILD_DIR/HybridFLApp/gradle.properties"
+          grep -v "org.gradle.jvmargs" "$GRADLE_PROPS" > /tmp/gp.tmp || true
+          mv /tmp/gp.tmp "$GRADLE_PROPS" 2>/dev/null || true
+          echo "org.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=512m" >> "$GRADLE_PROPS"
+
       - name: Build Debug APK
         script: |
-          cd $CM_BUILD_DIR/HybridFLApp
+          cd "$CM_BUILD_DIR/HybridFLApp"
           sed -i 's/\r//' gradlew
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew assembleDebug --stacktrace
+
     artifacts:
       - "**/build/outputs/apk/debug/*.apk"
+
     publishing:
       email:
         recipients:
           - aimanmudenur2@gmail.com
+        notify:
+          success: true
+          failure: true
