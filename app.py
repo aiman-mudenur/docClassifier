@@ -1,8 +1,6 @@
 """
 Federated Learning Server — app.py
 Dataset: DBpedia-14 (14-class text classification)
-Model:   Dense(100→64→32→14)
-Deploy:  Render (gunicorn)
 """
 
 from flask import Flask, request, jsonify
@@ -20,20 +18,10 @@ log = logging.getLogger(__name__)
 app = Flask(__name__)
 
 CLASS_NAMES = {
-    "0":  "Company",
-    "1":  "EducationalInstitution",
-    "2":  "Artist",
-    "3":  "Athlete",
-    "4":  "OfficeHolder",
-    "5":  "MeanOfTransportation",
-    "6":  "Building",
-    "7":  "NaturalPlace",
-    "8":  "Village",
-    "9":  "Animal",
-    "10": "Plant",
-    "11": "Album",
-    "12": "Film",
-    "13": "WrittenWork",
+    "0": "Company", "1": "EducationalInstitution", "2": "Artist",
+    "3": "Athlete", "4": "OfficeHolder", "5": "MeanOfTransportation",
+    "6": "Building", "7": "NaturalPlace", "8": "Village", "9": "Animal",
+    "10": "Plant", "11": "Album", "12": "Film", "13": "WrittenWork"
 }
 
 INPUT_DIM    = 100
@@ -43,16 +31,12 @@ NUM_CLASSES  = 14
 WEIGHTS_FILE = "initial_weights.json"
 MIN_CLIENTS  = 3
 
-
 def load_initial_weights():
     if os.path.exists(WEIGHTS_FILE):
         with open(WEIGHTS_FILE) as f:
             weights = json.load(f)
-        log.info(f"Loaded initial_weights.json — {len(weights)} layers")
-        for i, w in enumerate(weights):
-            log.info(f"  Layer {i}: shape={np.array(w).shape}")
+        log.info("Loaded initial_weights.json — %d layers", len(weights))
         return weights
-
     log.warning("initial_weights.json not found — generating zero weights.")
     layers = [
         np.zeros((INPUT_DIM, HIDDEN1)).tolist(),
@@ -66,14 +50,12 @@ def load_initial_weights():
         json.dump(layers, f)
     return layers
 
-
 global_weights  = load_initial_weights()
 client_updates  = []
 lock            = threading.Lock()
 round_number    = 0
 round_history   = []
 client_registry = {}
-
 
 def fedavg(updates):
     total_samples = sum(u.get("num_samples", 1) for u in updates)
@@ -88,15 +70,13 @@ def fedavg(updates):
         averaged.append(np.sum(layer_stack, axis=0).tolist())
     return averaged
 
-
-def resource_score(meta: dict) -> float:
+def resource_score(meta):
     battery  = meta.get("battery_level", 100)
     charging = meta.get("is_charging", True)
     score    = battery / 100.0
     if charging:
         score = min(1.0, score + 0.15)
     return round(score, 3)
-
 
 def topic_distribution(updates):
     merged = defaultdict(int)
@@ -106,12 +86,11 @@ def topic_distribution(updates):
     total = sum(merged.values()) or 1
     return {CLASS_NAMES.get(k, k): round(v / total * 100, 2) for k, v in merged.items()}
 
-
 def _try_aggregate():
     global global_weights, client_updates, round_number
     if len(client_updates) < MIN_CLIENTS:
         return False
-    log.info(f"Aggregating round {round_number} with {len(client_updates)} clients...")
+    log.info("Aggregating round %d with %d clients...", round_number, len(client_updates))
     global_weights = fedavg(client_updates)
     dist = topic_distribution(client_updates)
     round_history.append({
@@ -122,9 +101,8 @@ def _try_aggregate():
     })
     round_number  += 1
     client_updates = []
-    log.info(f"Aggregation complete. Now on round {round_number}.")
+    log.info("Aggregation complete. Now on round %d.", round_number)
     return True
-
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -132,9 +110,8 @@ def health():
         "status":      "ok",
         "round":       round_number,
         "num_classes": NUM_CLASSES,
-        "dataset":     "DBpedia-14",
+        "dataset":     "DBpedia-14"
     })
-
 
 @app.route("/status", methods=["GET"])
 def status():
@@ -145,9 +122,8 @@ def status():
         "clients_waiting": waiting,
         "min_clients":     MIN_CLIENTS,
         "registered":      len(client_registry),
-        "history":         round_history[-5:],
+        "history":         round_history[-5:]
     })
-
 
 @app.route("/get_global_model", methods=["GET"])
 def get_global_model():
@@ -156,9 +132,8 @@ def get_global_model():
         "round":       round_number,
         "layers":      len(global_weights),
         "num_classes": NUM_CLASSES,
-        "class_names": CLASS_NAMES,
+        "class_names": CLASS_NAMES
     })
-
 
 @app.route("/register", methods=["POST"])
 def register():
@@ -166,9 +141,8 @@ def register():
     device_id = data.get("device_id", "unknown")
     with lock:
         client_registry[device_id] = {**data, "registered_at": time.time()}
-    log.info(f"Registered device: {device_id}  total={len(client_registry)}")
+    log.info("Registered device: %s  total=%d", device_id, len(client_registry))
     return jsonify({"status": "registered", "device_id": device_id})
-
 
 @app.route("/upload_weights", methods=["POST"])
 def upload_weights():
@@ -183,39 +157,68 @@ def upload_weights():
         return jsonify({"status": "error", "message": "Missing or invalid weights"}), 400
 
     if len(weights) != len(global_weights):
-        return jsonify({
-            "status":  "error",
-            "message": f"Layer count mismatch: got {len(weights)}, expected {len(global_weights)}",
-        }), 400
+        msg = "Layer count mismatch: got %d, expected %d" % (len(weights), len(global_weights))
+        return jsonify({"status": "error", "message": msg}), 400
 
-    for i, (client_layer, global_layer) in enumerate(zip(weights, global_weights)):
-        cs = np.array(client_layer).shape
-        gs = np.array(global_layer).shape
+    for i, (cl, gl) in enumerate(zip(weights, global_weights)):
+        cs = np.array(cl).shape
+        gs = np.array(gl).shape
         if cs != gs:
-            return jsonify({
-                "status":  "error",
-                "message": f"Shape mismatch at layer {i}: client={cs} vs server={gs}",
-            }), 400
+            msg = "Shape mismatch at layer %d: client=%s vs server=%s" % (i, cs, gs)
+            return jsonify({"status": "error", "message": msg}), 400
 
     if client_round >= 0 and round_number - client_round > 2:
         return jsonify({
             "status":  "stale",
-            "message": f"Update from round {client_round}; server is on {round_number}.",
-            "round":   round_number,
+            "message": "Update from round %d; server is on %d." % (client_round, round_number),
+            "round":   round_number
         }), 409
 
     resource = resource_score(data)
-    log.info(
-        f"[{device_id}] weights received | "
-        f"samples={data.get('num_samples', 1)} "
-        f"battery={data.get('battery_level', '?')}% "
-        f"resource_score={resource}"
-    )
+    log.info("[%s] weights received | samples=%s battery=%s%% score=%s",
+             device_id, data.get("num_samples", 1),
+             data.get("battery_level", "?"), resource)
 
-    aggregated = False
+    aggregated    = False
+    clients_before = 0
     with lock:
         existing_ids = {u["device_id"] for u in client_updates}
         if device_id in existing_ids:
             return jsonify({
                 "status":  "duplicate",
-                "message": "
+                "message": "Already received update from this device this round",
+                "round":   round_number
+            }), 200
+
+        client_updates.append({
+            "device_id":      device_id,
+            "weights":        weights,
+            "num_samples":    data.get("num_samples", 1),
+            "topic_counts":   data.get("topic_counts", {}),
+            "doc_types":      data.get("doc_types", []),
+            "local_loss":     data.get("local_loss", 0.0),
+            "battery_level":  data.get("battery_level", 100),
+            "resource_score": resource,
+            "received_at":    time.time(),
+        })
+        clients_before = len(client_updates)
+        log.info("Collected %d/%d updates for round %d", clients_before, MIN_CLIENTS, round_number)
+        aggregated = _try_aggregate()
+
+    if aggregated:
+        msg = "Round %d aggregated with %d clients." % (round_number - 1, MIN_CLIENTS)
+        status_str = "aggregated"
+    else:
+        remaining = MIN_CLIENTS - clients_before
+        msg = "Waiting for %d more client(s)." % remaining
+        status_str = "accepted"
+
+    return jsonify({
+        "status":  status_str,
+        "round":   round_number,
+        "message": msg
+    }), 200
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
