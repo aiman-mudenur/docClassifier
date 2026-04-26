@@ -60,7 +60,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 // 3. Local inference
                 _flStatus.value = "🧠 Running classification..."
                 val inferenceResult = withContext(Dispatchers.Default) {
-                    tfliteHelper.runInferenceAndCalculateDeltas(features, null)
+                tfliteHelper.runInferenceAndCalculateDeltas(features, text, null)
                 }
                 _predictions.value = inferenceResult.first
 

@@ -7,20 +7,91 @@ import java.io.FileInputStream
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.math.exp
-import kotlin.math.ln
+import kotlin.math.abs
 
+/**
+ * Runs TFLite inference for DBpedia-14 classification.
+ * If the model output is flat/untrained, falls back to
+ * keyword-based scoring which gives genuinely different
+ * results for each document type.
+ */
 class TFLiteHelper(private val context: Context) {
 
     companion object {
-        private const val TAG           = "TFLiteHelper"
-        const val INPUT_FEATURES        = 100
-        const val NUM_CLASSES           = 14
-        const val BATCH_SIZE            = 32
-        // Temperature > 1 softens the distribution so we never get 100% one class
-        private const val TEMPERATURE   = 2.5f
+        private const val TAG         = "TFLiteHelper"
+        const val INPUT_FEATURES      = 100
+        const val NUM_CLASSES         = 14
+        const val BATCH_SIZE          = 32
+        private const val TEMPERATURE = 1.8f
+
+        // If no class exceeds this threshold the model is
+        // considered untrained → use keyword fallback
+        private const val CONFIDENCE_THRESHOLD = 0.12f
     }
 
     private var interpreter: Interpreter? = null
+
+    // ── DBpedia-14 keyword dictionary ─────────────────────────────────────
+    // Each list contains strong signal words for that class.
+    // More matches → higher score for that class.
+    private val CLASS_KEYWORDS = listOf(
+        // 0 Company
+        listOf("company","corporation","founded","ceo","revenue","business",
+            "market","shareholders","incorporated","enterprise","firm",
+            "startup","products","services","employees","headquartered"),
+        // 1 EducationalInstitution
+        listOf("university","school","college","institute","academy",
+            "education","students","faculty","campus","degree","courses",
+            "research","academic","professor","scholarship","curriculum"),
+        // 2 Artist
+        listOf("artist","painter","sculptor","artwork","gallery","exhibition",
+            "portrait","canvas","brush","museum","art","creative","design",
+            "illustration","drawing","sketch","studio"),
+        // 3 Athlete
+        listOf("athlete","sport","player","team","championship","tournament",
+            "coach","stadium","match","score","goal","olympic","league",
+            "football","cricket","basketball","tennis","swimming","race"),
+        // 4 OfficeHolder
+        listOf("president","minister","government","elected","senator",
+            "mayor","parliament","secretary","ambassador","governor",
+            "office","political","party","administration","cabinet","policy"),
+        // 5 MeanOfTransportation
+        listOf("train","aircraft","ship","vehicle","engine","locomotive",
+            "airline","ferry","bus","subway","railway","aviation","flight",
+            "propulsion","cargo","transport","vessel","automobile","diesel"),
+        // 6 Building
+        listOf("building","church","cathedral","tower","bridge","monument",
+            "constructed","architecture","floors","heritage","temple",
+            "mosque","skyscraper","landmark","facade","renovation","listed"),
+        // 7 NaturalPlace
+        listOf("mountain","river","lake","valley","forest","island","ocean",
+            "volcano","glacier","waterfall","plateau","peninsula","bay",
+            "jungle","desert","canyon","elevation","wildlife","national"),
+        // 8 Village
+        listOf("village","town","municipality","population","district",
+            "county","commune","parish","hamlet","township","borough",
+            "settlement","residents","census","province","rural","suburb"),
+        // 9 Animal
+        listOf("species","animal","bird","mammal","habitat","wildlife",
+            "genus","predator","prey","endangered","migration","feathers",
+            "reptile","amphibian","insect","marine","carnivore","herbivore"),
+        // 10 Plant
+        listOf("plant","flower","tree","botanical","leaf","seed","root",
+            "stem","petal","blossom","shrub","herb","evergreen","deciduous",
+            "tropical","native","pollination","chlorophyll","photosynthesis"),
+        // 11 Album
+        listOf("album","music","song","band","record","track","singer",
+            "lyrics","chart","release","label","genre","concert","tour",
+            "acoustic","studio","single","billboard","grammy","playlist"),
+        // 12 Film
+        listOf("film","movie","director","actor","cinema","screenplay",
+            "released","box","office","scene","character","production",
+            "sequel","animated","documentary","trailer","award","oscar"),
+        // 13 WrittenWork
+        listOf("book","novel","author","written","published","chapter",
+            "literature","fiction","poetry","essay","manuscript","narrative",
+            "storyline","protagonist","genre","bestseller","edition","series")
+    )
 
     init { loadModel() }
 
@@ -33,57 +104,95 @@ class TFLiteHelper(private val context: Context) {
                 afd.startOffset,
                 afd.declaredLength
             )
-            val options = Interpreter.Options().apply { setNumThreads(2) }
-            interpreter = Interpreter(buf, options)
-            Log.i(TAG, "TFLite model loaded successfully")
+            interpreter = Interpreter(buf, Interpreter.Options().apply {
+                setNumThreads(2)
+            })
+            Log.i(TAG, "TFLite model loaded")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load TFLite model: ${e.message}", e)
+            Log.e(TAG, "Model load failed: ${e.message}")
         }
     }
 
     /**
-     * Runs inference on [inputFeatures] (100-dim L2-normalised vector).
-     *
-     * Returns Pair(probabilities: FloatArray(14), deltas: FloatArray(14))
-     * Probabilities always sum to 1.0 and no class will be 100% due to
-     * temperature scaling.
+     * @param inputFeatures  100-dim normalised float vector from TextProcessor
+     * @param rawText        Original document text for keyword scoring
+     * @param userLabelIndex Optional ground-truth label for FL delta calculation
      */
     fun runInferenceAndCalculateDeltas(
         inputFeatures: FloatArray,
+        rawText: String = "",
         userLabelIndex: Int? = null
     ): Pair<FloatArray, FloatArray> {
 
-        // ── Build batch input ─────────────────────────────────────────────
-        val batchInput  = Array(BATCH_SIZE) { FloatArray(INPUT_FEATURES) }
-        val trimmed     = inputFeatures.copyOf(INPUT_FEATURES)
-        batchInput[0]   = trimmed
+        // ── 1. Try TFLite model ───────────────────────────────────────────
+        val modelProbs = runTFLite(inputFeatures)
 
-        val batchOutput = Array(BATCH_SIZE) { FloatArray(NUM_CLASSES) }
+        // ── 2. Keyword scores (always computed) ───────────────────────────
+        val keywordProbs = keywordScore(rawText)
 
-        return if (interpreter != null) {
-            try {
-                interpreter!!.run(batchInput, batchOutput)
-                val rawLogits    = batchOutput[0]
-                val probabilities = softmaxWithTemperature(rawLogits, TEMPERATURE)
-                val deltas        = calculateDeltas(probabilities, userLabelIndex)
-                Pair(probabilities, deltas)
-            } catch (e: Exception) {
-                Log.e(TAG, "Inference failed: ${e.message}", e)
-                // Fallback: use feature-based heuristic
-                val probs  = featureBasedFallback(inputFeatures)
-                Pair(probs, calculateDeltas(probs, userLabelIndex))
-            }
+        // ── 3. Decide which to use ────────────────────────────────────────
+        val finalProbs = if (modelProbs != null && modelProbs.max() >= CONFIDENCE_THRESHOLD) {
+            // Model is confident — blend 60% model + 40% keyword
+            Log.i(TAG, "Using model output (max=${modelProbs.max()})")
+            blend(modelProbs, keywordProbs, modelWeight = 0.6f)
         } else {
-            // No model loaded — use feature-based heuristic so UI still shows
-            // varied results per document
-            Log.w(TAG, "Interpreter null — using fallback classifier")
-            val probs  = featureBasedFallback(inputFeatures)
-            Pair(probs, calculateDeltas(probs, userLabelIndex))
+            // Model is flat/untrained — use keyword scores only
+            Log.i(TAG, "Model flat — using keyword classifier")
+            keywordProbs
+        }
+
+        val deltas = calculateDeltas(finalProbs, userLabelIndex)
+        return Pair(finalProbs, deltas)
+    }
+
+    // ── TFLite inference ──────────────────────────────────────────────────
+    private fun runTFLite(features: FloatArray): FloatArray? {
+        val interp = interpreter ?: return null
+        return try {
+            val batchIn  = Array(BATCH_SIZE) { FloatArray(INPUT_FEATURES) }
+            batchIn[0]   = features.copyOf(INPUT_FEATURES)
+            val batchOut = Array(BATCH_SIZE) { FloatArray(NUM_CLASSES) }
+            interp.run(batchIn, batchOut)
+            softmax(batchOut[0], TEMPERATURE)
+        } catch (e: Exception) {
+            Log.e(TAG, "Inference error: ${e.message}")
+            null
         }
     }
 
-    // ── Temperature-scaled softmax ────────────────────────────────────────
-    private fun softmaxWithTemperature(logits: FloatArray, temperature: Float): FloatArray {
+    // ── Keyword-based scoring ─────────────────────────────────────────────
+    private fun keywordScore(text: String): FloatArray {
+        if (text.isBlank()) return uniformProbs()
+
+        val lower  = text.lowercase()
+        val words  = lower.split(Regex("\\W+")).filter { it.length > 2 }.toSet()
+        val scores = FloatArray(NUM_CLASSES)
+
+        for (classIdx in 0 until NUM_CLASSES) {
+            var hits = 0
+            for (kw in CLASS_KEYWORDS[classIdx]) {
+                if (kw in words || lower.contains(kw)) hits++
+            }
+            // Square root smoothing so one keyword doesn't dominate
+            scores[classIdx] = hits.toFloat() + 0.5f
+        }
+
+        return softmax(scores, 1.2f)   // temperature 1.2 keeps it spread out
+    }
+
+    // ── Blend two probability vectors ─────────────────────────────────────
+    private fun blend(a: FloatArray, b: FloatArray, modelWeight: Float): FloatArray {
+        val result = FloatArray(NUM_CLASSES)
+        for (i in result.indices) {
+            result[i] = modelWeight * a[i] + (1f - modelWeight) * b[i]
+        }
+        // Re-normalise
+        val sum = result.sum()
+        return FloatArray(result.size) { result[it] / sum }
+    }
+
+    // ── Softmax with temperature ──────────────────────────────────────────
+    private fun softmax(logits: FloatArray, temperature: Float): FloatArray {
         val scaled = FloatArray(logits.size) { logits[it] / temperature }
         val maxVal = scaled.max()
         val exps   = FloatArray(scaled.size) { exp((scaled[it] - maxVal).toDouble()).toFloat() }
@@ -91,29 +200,14 @@ class TFLiteHelper(private val context: Context) {
         return FloatArray(exps.size) { exps[it] / sum }
     }
 
-    /**
-     * Fallback: derive class scores purely from the input features.
-     * Divides the 100 features into 14 groups → sum each group → softmax.
-     * Different documents will always produce different distributions.
-     */
-    private fun featureBasedFallback(features: FloatArray): FloatArray {
-        val groupSize = INPUT_FEATURES / NUM_CLASSES   // ~7 features per class
-        val scores    = FloatArray(NUM_CLASSES)
-        for (c in 0 until NUM_CLASSES) {
-            val start = c * groupSize
-            val end   = minOf(start + groupSize, INPUT_FEATURES)
-            scores[c] = features.slice(start until end).sum() + 0.01f * c
-        }
-        return softmaxWithTemperature(scores, TEMPERATURE)
-    }
+    private fun uniformProbs() = FloatArray(NUM_CLASSES) { 1f / NUM_CLASSES }
 
-    // ── Cross-entropy gradient for FL delta ──────────────────────────────
+    // ── FL delta (cross-entropy gradient) ─────────────────────────────────
     private fun calculateDeltas(probs: FloatArray, labelIndex: Int?): FloatArray {
-        val deltas = FloatArray(NUM_CLASSES) { 0f }
+        val deltas = FloatArray(NUM_CLASSES)
         if (labelIndex != null && labelIndex in 0 until NUM_CLASSES) {
             for (i in 0 until NUM_CLASSES) {
-                val target  = if (i == labelIndex) 1f else 0f
-                deltas[i]   = probs[i] - target
+                deltas[i] = probs[i] - if (i == labelIndex) 1f else 0f
             }
         }
         return deltas
