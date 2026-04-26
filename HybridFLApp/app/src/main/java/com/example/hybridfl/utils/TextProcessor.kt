@@ -1,48 +1,67 @@
 package com.example.hybridfl.utils
 
 import android.content.Context
-import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import kotlin.math.ln
+import kotlin.math.sqrt
 
+/**
+ * Converts raw document text into a 100-dim float feature vector.
+ *
+ * Uses feature hashing (hashing trick) with unigrams + bigrams so that
+ * every document produces DIFFERENT features regardless of vocabulary.
+ * L2-normalised so values are always in a stable range for the TFLite model.
+ */
 class TextProcessor(private val context: Context) {
-    private val vocab = mutableMapOf<String, Int>()
-    private val maxLen = 100
 
-    init {
-        loadVocab()
+    companion object {
+        const val FEATURE_DIM   = 100
+        const val UNIGRAM_BINS  = 60   // first 60 dimensions = unigram TF
+        const val BIGRAM_BINS   = 40   // last  40 dimensions = bigram TF
     }
 
-    private fun loadVocab() {
-        try {
-            // Load a lightweight vocab json (simulation of WordPiece/BPE)
-            val inputStream = context.assets.open("vocab.json")
-            val br = BufferedReader(InputStreamReader(inputStream))
-            val jsonText = br.use { it.readText() }
-            val jsonObject = JSONObject(jsonText)
-            
-            jsonObject.keys().forEach { key ->
-                vocab[key] = jsonObject.getInt(key)
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            // Fast fail fallback
-            vocab["default"] = 1
-        }
-    }
+    // Simple English stop-words to ignore
+    private val stopWords = setOf(
+        "the","a","an","is","it","in","on","at","to","of","and","or",
+        "for","with","that","this","was","are","be","as","by","from",
+        "has","have","had","not","but","we","they","he","she","you","i"
+    )
 
     fun processText(text: String): FloatArray {
-        // We use FloatArray representing the INT IDs because TFLite often maps better to Floats for standard MLPs.
-        val words = text.lowercase().replace(Regex("[^a-z0-9 ]"), " ").split("\\s+".toRegex())
-        val sequence = FloatArray(maxLen) { 0f } // 0 corresponds to <PAD> or <UNK>
+        val features = FloatArray(FEATURE_DIM) { 0f }
 
-        var index = 0
+        if (text.isBlank()) return features
+
+        // ── Tokenise ──────────────────────────────────────────────────────
+        val words = text.lowercase()
+            .replace(Regex("[^a-z0-9\\s]"), " ")
+            .split(Regex("\\s+"))
+            .filter { it.length > 2 && it !in stopWords }
+            .take(500)          // cap at 500 words for speed
+
+        if (words.isEmpty()) return features
+
+        // ── Unigram TF (feature hashing into bins 0..59) ──────────────────
         for (word in words) {
-            if (word.isBlank()) continue
-            if (index >= maxLen) break
-            sequence[index] = (vocab[word] ?: 1).toFloat() // Assume 1 is <UNK>
-            index++
+            val bin = (word.hashCode() and 0x7FFF_FFFF) % UNIGRAM_BINS
+            features[bin] += 1f
         }
-        return sequence
+
+        // ── Bigram TF (feature hashing into bins 60..99) ─────────────────
+        for (i in 0 until words.size - 1) {
+            val bigram = "${words[i]}_${words[i + 1]}"
+            val bin = UNIGRAM_BINS + (bigram.hashCode() and 0x7FFF_FFFF) % BIGRAM_BINS
+            features[bin] += 1f
+        }
+
+        // ── Sub-linear TF scaling: tf = 1 + log(tf) ──────────────────────
+        for (i in features.indices) {
+            if (features[i] > 0f) features[i] = 1f + ln(features[i]).toFloat()
+        }
+
+        // ── L2 normalise so the vector lives on the unit sphere ───────────
+        val norm = sqrt(features.map { it * it }.sum())
+        if (norm > 0f) for (i in features.indices) features[i] /= norm
+
+        return features
     }
 }

@@ -12,6 +12,7 @@ import com.example.hybridfl.utils.FileUtil
 import com.example.hybridfl.utils.TextProcessor
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
+import com.google.gson.JsonPrimitive
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,101 +28,119 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val tfliteHelper  = TFLiteHelper(application)
     private val deviceId      = "android-" + UUID.randomUUID().toString().substring(0, 8)
 
-    private val _predictions = MutableStateFlow<FloatArray?>(null)
+    private val _predictions  = MutableStateFlow<FloatArray?>(null)
     val predictions: StateFlow<FloatArray?> = _predictions
 
-    private val _flStatus = MutableStateFlow("Waiting")
+    private val _flStatus     = MutableStateFlow("Ready — upload a document to start")
     val flStatus: StateFlow<String> = _flStatus
 
     private val _batteryLevel = MutableStateFlow(85)
     val batteryLevel: StateFlow<Int> = _batteryLevel
 
-    // ── Main entry point ──────────────────────────────────────────────────
+    // ── Entry point called when user picks a document ─────────────────────
     fun processDocument(uri: Uri) {
         viewModelScope.launch {
             try {
-                _flStatus.value = "Extracting text..."
+                // 1. Extract text
+                _flStatus.value = "📄 Extracting text..."
                 val text = withContext(Dispatchers.IO) {
                     FileUtil.extractTextFromUri(getApplication(), uri)
                 }
-
-                _flStatus.value = "Processing NLP..."
-                val features = textProcessor.processText(text)
-
-                _flStatus.value = "Running inference..."
-                val result = withContext(Dispatchers.Default) {
-                    tfliteHelper.runInferenceAndCalculateDeltas(features, 3)
+                if (text.isBlank()) {
+                    _flStatus.value = "❌ Could not read document text"
+                    return@launch
                 }
-                _predictions.value = result.first
 
-                // Now do the full FL round
-                runFLRound()
+                // 2. Feature extraction
+                _flStatus.value = "🔍 Processing text features..."
+                val features = withContext(Dispatchers.Default) {
+                    textProcessor.processText(text)
+                }
+
+                // 3. Local inference
+                _flStatus.value = "🧠 Running classification..."
+                val inferenceResult = withContext(Dispatchers.Default) {
+                    tfliteHelper.runInferenceAndCalculateDeltas(features, null)
+                }
+                _predictions.value = inferenceResult.first
+
+                // 4. FL round (register → fetch round → upload weights)
+                runFLRound(inferenceResult.second, text)
 
             } catch (e: Exception) {
                 e.printStackTrace()
-                _flStatus.value = "Error: ${e.message}"
+                _flStatus.value = "❌ Error: ${e.message}"
             }
         }
     }
 
-    // ── FL Round: register → fetch model → train → upload ─────────────────
-    private suspend fun runFLRound() {
+    // ── Full Federated Learning round ─────────────────────────────────────
+    private suspend fun runFLRound(deltas: FloatArray, docText: String) {
         if (_batteryLevel.value < 20) {
-            _flStatus.value = "FL Skipped (Low Battery)"
+            _flStatus.value = "⚠️ FL skipped — battery too low"
             return
         }
 
         withContext(Dispatchers.IO) {
 
-            // STEP 1 — Register with retry (handles Render cold-start)
-            _flStatus.value = "Registering device..."
+            // ── STEP 1: Register with Render (retry for cold-start) ───────
+            _flStatus.value = "📡 Connecting to FL server..."
             var registered = false
             for (attempt in 1..3) {
                 try {
-                    val regResp = RetrofitClient.apiService.register(
+                    val resp = RetrofitClient.apiService.register(
                         RegisterRequest(
                             device_id     = deviceId,
                             battery_level = _batteryLevel.value,
                             is_charging   = true
                         )
                     )
-                    if (regResp.isSuccessful) {
-                        registered = true
-                        break
-                    }
+                    if (resp.isSuccessful) { registered = true; break }
+                    else _flStatus.value = "⏳ Server waking up... ($attempt/3)"
                 } catch (e: Exception) {
-                    _flStatus.value = "Connecting to server (attempt $attempt/3)..."
-                    delay(4_000)
+                    _flStatus.value = "⏳ Connecting... ($attempt/3)"
+                    delay(5_000)
                 }
             }
+
             if (!registered) {
-                _flStatus.value = "FL failed: server unreachable"
+                _flStatus.value = "❌ FL failed — server unreachable"
                 return@withContext
             }
 
-            // STEP 2 — Fetch global model to get current weights + round number
-            _flStatus.value = "Fetching global model..."
+            // ── STEP 2: Fetch global model to get current round number ────
+            _flStatus.value = "⬇️ Fetching global model..."
             val modelResp = try {
                 RetrofitClient.apiService.getGlobalModel()
             } catch (e: Exception) {
-                _flStatus.value = "FL error: ${e.message}"
+                _flStatus.value = "❌ FL error: ${e.message}"
                 return@withContext
             }
 
             if (!modelResp.isSuccessful || modelResp.body() == null) {
-                _flStatus.value = "FL failed: could not fetch model"
+                _flStatus.value = "❌ FL failed — could not fetch model (${modelResp.code()})"
                 return@withContext
             }
 
-            val globalModel = modelResp.body()!!
+            val globalModel  = modelResp.body()!!
             val currentRound = globalModel.round
 
-            // STEP 3 — Simulate local training: add tiny noise to each weight
-            _flStatus.value = "Local training..."
+            // ── STEP 3: Check how many clients are waiting ────────────────
+            val statusResp = try { RetrofitClient.apiService.getStatus() } catch (e: Exception) { null }
+            val waiting    = statusResp?.body()?.clients_waiting ?: 0
+            val minClients = statusResp?.body()?.min_clients ?: 3
+
+            // ── STEP 4: Build updated weights (add noise to global model) ─
+            _flStatus.value = "⚙️ Local training... (round $currentRound)"
             val updatedWeights = addNoiseToWeights(globalModel.weights)
 
-            // STEP 4 — Upload updated weights
-            _flStatus.value = "Sending weights to server..."
+            // ── STEP 5: Build topic counts from top predicted class ────────
+            val topClass = _predictions.value
+                ?.mapIndexed { i, v -> i to v }
+                ?.maxByOrNull { it.second }?.first ?: 0
+
+            // ── STEP 6: Upload weights ────────────────────────────────────
+            _flStatus.value = "⬆️ Uploading weights to server..."
             try {
                 val request = FLUpdateRequest(
                     device_id     = deviceId,
@@ -131,35 +150,39 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     is_charging   = true,
                     local_loss    = 0.31f,
                     round         = currentRound,
-                    topic_counts  = mapOf("0" to 50, "1" to 30, "2" to 20),
-                    doc_types     = listOf("pdf", "docx")
+                    topic_counts  = mapOf(topClass.toString() to 100),
+                    doc_types     = listOf("document")
                 )
 
-                val response = RetrofitClient.apiService.sendWeights(request)
-                if (response.isSuccessful) {
-                    val body = response.body()
-                    val status = body?.status ?: "done"
+                val uploadResp = RetrofitClient.apiService.sendWeights(request)
+
+                if (uploadResp.isSuccessful) {
+                    val body   = uploadResp.body()
+                    val status = body?.status ?: "unknown"
                     val round  = body?.round  ?: currentRound
-                    // accepted = waiting for more clients
-                    // aggregated = all 3 clients submitted, FL round complete
+
                     _flStatus.value = when (status) {
-                        "aggregated" -> "FL complete — round $round done ✓"
-                        "accepted"   -> "FL accepted — waiting for other clients (round $round)"
-                        "duplicate"  -> "FL duplicate — already submitted this round"
-                        else         -> "FL $status — round $round"
+                        "aggregated" ->
+                            "✅ FL complete! Round $round aggregated (all $minClients clients submitted)"
+                        "accepted"   ->
+                            "⏳ FL accepted — waiting for ${minClients - waiting - 1} more client(s) (round $round)"
+                        "duplicate"  ->
+                            "ℹ️ Already submitted this round ($round)"
+                        else         ->
+                            "✅ FL $status — round $round"
                     }
                 } else {
-                    _flStatus.value = "FL failed: ${response.code()}"
+                    _flStatus.value = "❌ FL failed: ${uploadResp.code()}"
                 }
+
             } catch (e: Exception) {
                 e.printStackTrace()
-                _flStatus.value = "FL error: ${e.message}"
+                _flStatus.value = "❌ FL error: ${e.message}"
             }
         }
     }
 
-    // ── Add small Gaussian noise to simulate local gradient update ─────────
-    // Preserves the exact nested structure (2D matrices stay 2D, 1D biases stay 1D)
+    // ── Add Gaussian noise to simulate local gradient update ──────────────
     private fun addNoiseToWeights(weights: JsonArray): JsonArray {
         val result = JsonArray()
         for (layer: JsonElement in weights) {
@@ -171,16 +194,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun addNoiseToElement(element: JsonElement): JsonElement {
         return when {
             element.isJsonArray -> {
-                val arr    = element.asJsonArray
-                val result = JsonArray()
-                for (child in arr) result.add(addNoiseToElement(child))
-                result
+                val arr = element.asJsonArray
+                val out = JsonArray()
+                for (child in arr) out.add(addNoiseToElement(child))
+                out
             }
             element.isJsonPrimitive -> {
-                // Add tiny noise: ±0.001
-                val original = element.asFloat
-                val noisy    = original + (Random.nextFloat() - 0.5f) * 0.002f
-                com.google.gson.JsonPrimitive(noisy)
+                val v = element.asFloat
+                JsonPrimitive(v + (Random.nextFloat() - 0.5f) * 0.002f)
             }
             else -> element
         }

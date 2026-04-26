@@ -6,7 +6,6 @@ import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.POST
 
-// ── Register ──────────────────────────────────────────────────────────────
 data class RegisterRequest(
     val device_id: String,
     val battery_level: Int,
@@ -19,8 +18,6 @@ data class RegisterResponse(
     val device_id: String
 )
 
-// ── Upload weights ─────────────────────────────────────────────────────────
-// weights is JsonArray so it handles both flat (bias) and nested (matrix) layers
 data class FLUpdateRequest(
     val device_id: String,
     val weights: JsonArray,
@@ -39,12 +36,18 @@ data class FLUpdateResponse(
     val round: Int?
 )
 
-// ── Global model ───────────────────────────────────────────────────────────
 data class GlobalModelResponse(
     val weights: JsonArray,
     val round: Int,
     val layers: Int,
     val num_classes: Int
+)
+
+data class StatusResponse(
+    val round: Int,
+    val clients_waiting: Int,
+    val min_clients: Int,
+    val registered: Int
 )
 
 interface ApiService {
@@ -57,6 +60,9 @@ interface ApiService {
 
     @POST("/upload_weights")
     suspend fun sendWeights(@Body request: FLUpdateRequest): Response<FLUpdateResponse>
+
+    @GET("/status")
+    suspend fun getStatus(): Response<StatusResponse>
 
     @GET("/health")
     suspend fun health(): Response<Map<String, Any>>
