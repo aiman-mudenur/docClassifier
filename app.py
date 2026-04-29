@@ -116,13 +116,43 @@ def health():
 @app.route("/status", methods=["GET"])
 def status():
     with lock:
-        waiting = len(client_updates)
+        waiting    = len(client_updates)
+        waiting_ids = [u["device_id"] for u in client_updates]
+
+    # Build detailed history with FedAvg info for each past round
+    detailed_history = []
+    for h in round_history[-5:]:
+        detailed_history.append({
+            "round":        h["round"],
+            "num_clients":  h["num_clients"],
+            "aggregation":  "FedAvg",
+            "topic_dist":   h.get("topic_dist", {}),
+            "timestamp":    h["timestamp"],
+            "completed_at": time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(h["timestamp"])
+            ),
+        })
+
+    # Current round progress
+    current_round_info = {
+        "round":            round_number,
+        "clients_submitted": waiting,
+        "clients_needed":   MIN_CLIENTS - waiting,
+        "min_clients":      MIN_CLIENTS,
+        "progress_pct":     round(waiting / MIN_CLIENTS * 100),
+        "submitted_devices": waiting_ids,
+        "aggregation_method": "FedAvg",
+        "status": "waiting_for_clients" if waiting < MIN_CLIENTS else "ready_to_aggregate",
+    }
+
     return jsonify({
-        "round":           round_number,
+        "current_round":  current_round_info,
+        "registered":     len(client_registry),
+        "history":        detailed_history,
+        # keep these flat fields so existing app code still works
+        "round":          round_number,
         "clients_waiting": waiting,
-        "min_clients":     MIN_CLIENTS,
-        "registered":      len(client_registry),
-        "history":         round_history[-5:]
+        "min_clients":    MIN_CLIENTS,
     })
 
 @app.route("/get_global_model", methods=["GET"])

@@ -35,12 +35,27 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val flStatus: StateFlow<String> = _flStatus
 
     private val _batteryLevel = MutableStateFlow(85)
-    val batteryLevel: StateFlow<Int> = _batteryLevel
+val batteryLevel: StateFlow<Int> = _batteryLevel
+
+private val _isCharging = MutableStateFlow(true)
+val isCharging: StateFlow<Boolean> = _isCharging
+
+private fun refreshBattery() {
+    val filter = android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED)
+    val intent = getApplication<Application>().registerReceiver(null, filter) ?: return
+    val lvl    = intent.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1)
+    val scale  = intent.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1)
+    val status = intent.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1)
+    if (lvl >= 0 && scale > 0) _batteryLevel.value = (lvl * 100f / scale).toInt()
+    _isCharging.value = status == android.os.BatteryManager.BATTERY_STATUS_CHARGING
+                     || status == android.os.BatteryManager.BATTERY_STATUS_FULL
+}
 
     // ── Entry point called when user picks a document ─────────────────────
     fun processDocument(uri: Uri) {
         viewModelScope.launch {
             try {
+                 refreshBattery()
                 // 1. Extract text
                 _flStatus.value = "📄 Extracting text..."
                 val text = withContext(Dispatchers.IO) {
@@ -76,10 +91,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── Full Federated Learning round ─────────────────────────────────────
     private suspend fun runFLRound(deltas: FloatArray, docText: String) {
-        if (_batteryLevel.value < 20) {
-            _flStatus.value = "⚠️ FL skipped — battery too low"
-            return
-        }
+        val batt     = _batteryLevel.value
+val charging = _isCharging.value
+if (batt < 20 && !charging) {
+    _flStatus.value = "❌ FL skipped — battery ${batt}% (plug in to enable FL)"
+    return
+}
+val flMode = when {
+    charging       -> "⚡ Charging"
+    batt >= 50     -> "🔋 Normal"
+    batt >= 30     -> "🪫 Low battery — reduced intensity"
+    else           -> "🔴 Very low battery — minimal update"
+}
+_flStatus.value = "Running FL ($flMode)..."
 
         withContext(Dispatchers.IO) {
 
